@@ -88,6 +88,7 @@ switch ($action) {
             }
             $exec = mysqli_query($conn, $sql);
             if ($exec) {
+                audit_log($conn, 'ubah_pengguna', 'admin', $idAdmin, ['username' => $username, 'role' => $role]);
                 echo json_encode(['status' => 'success', 'msg' => "Data pengguna '{$namaLengkap}' berhasil diperbarui."]);
             } else {
                 echo json_encode(['status' => 'error', 'msg' => 'Gagal memperbarui pengguna: ' . mysqli_error($conn)]);
@@ -106,6 +107,7 @@ switch ($action) {
             $sql = "INSERT INTO cbt_admin (username, password, nama_lengkap, role) VALUES ('$uEsc', '$passHash', '$nEsc', '$rEsc')";
             $exec = mysqli_query($conn, $sql);
             if ($exec) {
+                audit_log($conn, 'buat_pengguna', 'admin', mysqli_insert_id($conn), ['username' => $username, 'role' => $role]);
                 echo json_encode(['status' => 'success', 'msg' => "Pengguna baru '{$namaLengkap}' ({$role}) berhasil ditambahkan."]);
             } else {
                 echo json_encode(['status' => 'error', 'msg' => 'Gagal menambahkan pengguna: ' . mysqli_error($conn)]);
@@ -131,6 +133,7 @@ switch ($action) {
         $passHash = password_hash($newPass, PASSWORD_DEFAULT);
         $exec = mysqli_query($conn, "UPDATE cbt_admin SET password = '$passHash' WHERE id_admin = $idAdmin");
         if ($exec) {
+            audit_log($conn, 'ubah_password', 'admin', $idAdmin);
             echo json_encode(['status' => 'success', 'msg' => 'Kata sandi pengguna berhasil diperbarui.']);
         } else {
             echo json_encode(['status' => 'error', 'msg' => 'Gagal memperbarui kata sandi: ' . mysqli_error($conn)]);
@@ -159,6 +162,7 @@ switch ($action) {
 
         $exec = mysqli_query($conn, "DELETE FROM cbt_admin WHERE id_admin = $idAdmin");
         if ($exec) {
+            audit_log($conn, 'hapus_pengguna', 'admin', $idAdmin);
             echo json_encode(['status' => 'success', 'msg' => 'Pengguna berhasil dihapus dari sistem.']);
         } else {
             echo json_encode(['status' => 'error', 'msg' => 'Gagal menghapus pengguna: ' . mysqli_error($conn)]);

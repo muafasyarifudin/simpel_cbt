@@ -77,6 +77,10 @@ try {
             $token        = strtoupper(cbt_clean_input($conn, $_POST['token_ujian'] ?? ''));
             $target_jalur = cbt_clean_input($conn, $_POST['target_jalur'] ?? 'Semua Peserta');
             $status_ujian = in_array($_POST['status_ujian'] ?? '', ['draft', 'aktif', 'selesai', 'arsip']) ? $_POST['status_ujian'] : 'aktif';
+            $wajibPeserta = !empty($_POST['wajib_peserta_terdaftar']) ? 1 : 0;
+            $tampilkanHasil = !empty($_POST['tampilkan_hasil']) ? 1 : 0;
+            $maksPerangkat = max(1, min(5, (int)($_POST['maks_perangkat'] ?? 1)));
+            $namaSesi = cbt_clean_input($conn, $_POST['nama_sesi'] ?? 'Sesi Utama');
 
             if (empty($nama) || empty($kode) || empty($token) || empty($tgl_mulai) || empty($tgl_selesai)) {
                 echo json_encode(['status' => 'error', 'msg' => 'Nama Ujian, Kode, Token, dan Waktu Ujian wajib diisi!']);
@@ -106,14 +110,15 @@ try {
                             passing_grade = $pass_grade,
                             token_ujian = '$token',
                             target_jalur = '$target_jalur',
-                            status_ujian = '$status_ujian'
+                            status_ujian = '$status_ujian', wajib_peserta_terdaftar=$wajibPeserta,
+                            tampilkan_hasil=$tampilkanHasil, maks_perangkat=$maksPerangkat, nama_sesi='$namaSesi'
                         WHERE id_jadwal = $id";
                 $jadwalId = $id;
             } else {
                 $sql = "INSERT INTO cbt_jadwal 
-                            (nama_ujian, kode_ujian, tipe_ujian, id_kategori, durasi_menit, tgl_mulai, tgl_selesai, acak_soal, acak_opsi, passing_grade, token_ujian, target_jalur, status_ujian)
+                            (nama_ujian, kode_ujian, tipe_ujian, id_kategori, durasi_menit, tgl_mulai, tgl_selesai, acak_soal, acak_opsi, passing_grade, token_ujian, target_jalur, status_ujian,wajib_peserta_terdaftar,tampilkan_hasil,maks_perangkat,nama_sesi)
                         VALUES 
-                            ('$nama', '$kode', '$tipe', $idKatVal, $durasi, '$tgl_mulai', '$tgl_selesai', $acak_soal, $acak_opsi, $pass_grade, '$token', '$target_jalur', '$status_ujian')";
+                            ('$nama', '$kode', '$tipe', $idKatVal, $durasi, '$tgl_mulai', '$tgl_selesai', $acak_soal, $acak_opsi, $pass_grade, '$token', '$target_jalur', '$status_ujian',$wajibPeserta,$tampilkanHasil,$maksPerangkat,'$namaSesi')";
             }
 
             if (mysqli_query($conn, $sql)) {
@@ -144,6 +149,7 @@ try {
                     }
                 }
 
+                audit_log($conn, 'simpan_jadwal', 'jadwal', $jadwalId, ['kode'=>$kode,'status'=>$status_ujian]);
                 echo json_encode(['status' => 'success', 'msg' => 'Jadwal ujian berhasil disimpan!']);
             } else {
                 echo json_encode(['status' => 'error', 'msg' => 'Gagal menyimpan: ' . mysqli_error($conn)]);

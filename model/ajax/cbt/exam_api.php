@@ -19,7 +19,16 @@ try {
                 exit;
             }
 
-            $verify = auth_bridge_verify_user($no_peserta);
+            $bridgeConfig = get_auth_bridge_config();
+            $verify = null;
+            if (($bridgeConfig['mode'] ?? 'standalone') === 'standalone') {
+                $noEsc = mysqli_real_escape_string($conn, $no_peserta);
+                $pq = mysqli_query($conn, "SELECT no_peserta,nama_lengkap FROM cbt_peserta WHERE no_peserta='$noEsc' AND status=1 LIMIT 1");
+                if ($pq && ($pr = mysqli_fetch_assoc($pq))) {
+                    $verify = ['valid'=>true,'name'=>$pr['nama_lengkap'],'username'=>$pr['no_peserta'],'mode'=>'standalone_registered'];
+                }
+            }
+            if ($verify === null) $verify = auth_bridge_verify_user($no_peserta);
             if ($verify['valid']) {
                 echo json_encode([
                     'status'   => 'success',
@@ -78,6 +87,14 @@ try {
                 exit;
             }
 
+            if (!empty($jadwal['wajib_peserta_terdaftar'])) {
+                $participantId = (int)($verify['raw']['id_peserta'] ?? 0);
+                $assignment = mysqli_query($conn, "SELECT 1 FROM cbt_peserta_jadwal WHERE id_peserta=$participantId AND id_jadwal=$id_jadwal AND status='diizinkan' LIMIT 1");
+                if ($participantId <= 0 || !$assignment || mysqli_num_rows($assignment) === 0) {
+                    echo json_encode(['status'=>'error','msg'=>'Anda tidak terdaftar pada paket ujian ini.']); exit;
+                }
+            }
+
             // Validasi Token
             if (strtoupper($jadwal['token_ujian']) !== $token_input) {
                 echo json_encode(['status' => 'error', 'msg' => 'Token Ujian salah! Silakan periksa kembali token dari panitia/pengawas.']);
@@ -113,7 +130,7 @@ try {
                 }
 
                 // Sesi masih berjalan
-                $durasiTotalDetik = $jadwal['durasi_menit'] * 60;
+                $durasiTotalDetik = ($jadwal['durasi_menit'] * 60) + (int)($existingSesi['tambahan_detik'] ?? 0);
                 $waktuMulaiTs = strtotime($existingSesi['waktu_mulai']);
                 $detikBerlalu = time() - $waktuMulaiTs;
                 $sisaDetik = $durasiTotalDetik - $detikBerlalu;
@@ -160,9 +177,9 @@ try {
 
             mysqli_begin_transaction($conn);
             $sqlInsSesi = "INSERT INTO cbt_sesi 
-                            (id_jadwal, id_subtes_aktif, subtes_ke, no_pendaftaran, nama_peserta, waktu_mulai, sisa_detik, sisa_detik_subtes, status_sesi, ip_address, user_agent)
+                            (id_jadwal, id_subtes_aktif, subtes_ke, no_pendaftaran, nama_peserta, waktu_mulai, waktu_mulai_subtes, sisa_detik, sisa_detik_subtes, status_sesi, ip_address, user_agent)
                            VALUES 
-                            ($id_jadwal, $firstSubtesId, 1, '$no_peserta', '$nama_peserta', '$now', $durasiDetik, $durasiDetik, 'sedang_mengerjakan', '$ip', '$ua')";
+                            ($id_jadwal, $firstSubtesId, 1, '$no_peserta', '$nama_peserta', '$now', '$now', $durasiDetik, $durasiDetik, 'sedang_mengerjakan', '$ip', '$ua')";
             if (!mysqli_query($conn, $sqlInsSesi)) {
                 mysqli_rollback($conn);
                 echo json_encode(['status' => 'error', 'msg' => 'Gagal membuat sesi ujian.']);
@@ -237,10 +254,19 @@ try {
                 echo json_encode(['status' => 'error', 'msg' => 'Sesi ujian tidak ditemukan.']);
                 exit;
             }
+            if ($sesi['status_sesi'] === 'ditangguhkan') {
+                echo json_encode(['status'=>'suspended','msg'=>'Sesi ditangguhkan karena batas pelanggaran tercapai. Hubungi pengawas.']);exit;
+            }
 
-            $durasiTotalDetik = $sesi['durasi_menit'] * 60;
+            $durasiTotalDetik = ($sesi['durasi_menit'] * 60) + (int)($sesi['tambahan_detik'] ?? 0);
             $detikBerlalu = time() - strtotime($sesi['waktu_mulai']);
             $sisaDetik = max(0, $durasiTotalDetik - $detikBerlalu);
+            if ($sesi['tipe_ujian'] === 'multi_subtes' && !empty($sesi['id_subtes_aktif'])) {
+                $sq=mysqli_query($conn,"SELECT durasi_menit FROM cbt_jadwal_subtes WHERE id_subtes=".(int)$sesi['id_subtes_aktif']." LIMIT 1");
+                $sub=$sq?mysqli_fetch_assoc($sq):null;
+                $subStart=strtotime($sesi['waktu_mulai_subtes'] ?: $sesi['waktu_mulai']);
+                $sisaDetik=max(0,((int)($sub['durasi_menit']??0)*60)-(time()-$subStart));
+            }
 
             if ($sesi['status_sesi'] === 'selesai' || $sisaDetik <= 0) {
                 if ($sesi['status_sesi'] !== 'selesai') {
@@ -316,17 +342,21 @@ try {
             }
 
             $jawabanVal = in_array($jawaban, ['A', 'B', 'C', 'D', 'E']) ? "'$jawaban'" : "NULL";
-            $sql = "UPDATE cbt_jawaban jw
-                    JOIN cbt_sesi ss ON ss.id_sesi = jw.id_sesi
-                    JOIN cbt_jadwal jj ON jj.id_jadwal = ss.id_jadwal
-                    SET jw.jawaban_dipilih = $jawabanVal
-                    WHERE jw.id_sesi = $id_sesi AND jw.id_soal = $id_soal
-                      AND ss.status_sesi = 'sedang_mengerjakan'
-                      AND NOW() BETWEEN jj.tgl_mulai AND jj.tgl_selesai
-                      AND TIMESTAMPDIFF(SECOND, ss.waktu_mulai, NOW()) < jj.durasi_menit * 60";
+            $activeQ=mysqli_query($conn,"SELECT ss.status_sesi,ss.waktu_mulai,ss.tambahan_detik,jj.durasi_menit,jj.tgl_mulai,jj.tgl_selesai FROM cbt_sesi ss JOIN cbt_jadwal jj ON jj.id_jadwal=ss.id_jadwal WHERE ss.id_sesi=$id_sesi LIMIT 1");$active=$activeQ?mysqli_fetch_assoc($activeQ):null;
+            $serverNow=time();$allowedSave=$active&&$active['status_sesi']==='sedang_mengerjakan'&&$serverNow>=strtotime($active['tgl_mulai'])&&$serverNow<=strtotime($active['tgl_selesai'])&&($serverNow-strtotime($active['waktu_mulai']))<(((int)$active['durasi_menit']*60)+(int)$active['tambahan_detik']);
+            if(!$allowedSave){http_response_code(409);echo json_encode(['status'=>'error','msg'=>'Jawaban ditolak karena sesi tidak aktif atau waktu telah habis.']);exit;}
+            $oldQ = mysqli_query($conn, "SELECT jawaban_dipilih FROM cbt_jawaban WHERE id_sesi=$id_sesi AND id_soal=$id_soal LIMIT 1");
+            $oldAnswer = $oldQ && ($oldRow=mysqli_fetch_assoc($oldQ)) ? $oldRow['jawaban_dipilih'] : null;
+            $sql = "UPDATE cbt_jawaban SET jawaban_dipilih=$jawabanVal WHERE id_sesi=$id_sesi AND id_soal=$id_soal";
             mysqli_query($conn, $sql);
+            if (mysqli_affected_rows($conn) > 0) {
+                $oldEsc = $oldAnswer === null ? 'NULL' : "'" . mysqli_real_escape_string($conn,$oldAnswer) . "'";
+                $newEsc = $jawabanVal;
+                $ipEsc = mysqli_real_escape_string($conn, $_SERVER['REMOTE_ADDR'] ?? '');
+                mysqli_query($conn, "INSERT INTO cbt_jawaban_log(id_sesi,id_soal,jawaban_lama,jawaban_baru,ip_address) VALUES($id_sesi,$id_soal,$oldEsc,$newEsc,'$ipEsc')");
+            }
 
-            echo json_encode(['status' => 'success', 'jawaban' => $jawaban]);
+            echo json_encode(['status' => 'success', 'jawaban' => $jawaban, 'saved'=>true]);
             break;
 
         case 'set_ragu':
@@ -340,14 +370,9 @@ try {
                 exit;
             }
 
-            $sql = "UPDATE cbt_jawaban jw
-                    JOIN cbt_sesi ss ON ss.id_sesi = jw.id_sesi
-                    JOIN cbt_jadwal jj ON jj.id_jadwal = ss.id_jadwal
-                    SET jw.is_ragu = $is_ragu
-                    WHERE jw.id_sesi = $id_sesi AND jw.id_soal = $id_soal
-                      AND ss.status_sesi = 'sedang_mengerjakan'
-                      AND NOW() BETWEEN jj.tgl_mulai AND jj.tgl_selesai
-                      AND TIMESTAMPDIFF(SECOND, ss.waktu_mulai, NOW()) < jj.durasi_menit * 60";
+            $statusQ=mysqli_query($conn,"SELECT status_sesi FROM cbt_sesi WHERE id_sesi=$id_sesi LIMIT 1");$statusRow=$statusQ?mysqli_fetch_assoc($statusQ):null;
+            if(!$statusRow||$statusRow['status_sesi']!=='sedang_mengerjakan'){http_response_code(409);echo json_encode(['status'=>'error','msg'=>'Sesi tidak aktif.']);exit;}
+            $sql = "UPDATE cbt_jawaban SET is_ragu=$is_ragu WHERE id_sesi=$id_sesi AND id_soal=$id_soal";
             mysqli_query($conn, $sql);
 
             echo json_encode(['status' => 'success', 'is_ragu' => $is_ragu]);
@@ -361,6 +386,12 @@ try {
                 exit;
             }
 
+            $finishCheck=mysqli_query($conn,"SELECT s.id_jadwal,s.subtes_ke,j.tipe_ujian FROM cbt_sesi s JOIN cbt_jadwal j ON j.id_jadwal=s.id_jadwal WHERE s.id_sesi=$id_sesi LIMIT 1");
+            $finishRow=$finishCheck?mysqli_fetch_assoc($finishCheck):null;
+            if($finishRow&&$finishRow['tipe_ujian']==='multi_subtes'){
+                $later=mysqli_query($conn,"SELECT 1 FROM cbt_jadwal_subtes WHERE id_jadwal=".(int)$finishRow['id_jadwal']." AND urutan>".(int)$finishRow['subtes_ke']." LIMIT 1");
+                if($later&&mysqli_num_rows($later)){echo json_encode(['status'=>'error','msg'=>'Masih ada subtes berikutnya yang harus diselesaikan.']);exit;}
+            }
             $result = cbt_calculate_score($conn, $id_sesi);
             if ($result !== false) {
                 echo json_encode([
@@ -373,15 +404,47 @@ try {
             }
             break;
 
+        case 'next_subtes':
+            $id_sesi=(int)($_POST['id_sesi']??0); require_exam_session_owner($id_sesi);
+            $sq=mysqli_query($conn,"SELECT s.*,j.tipe_ujian FROM cbt_sesi s JOIN cbt_jadwal j ON j.id_jadwal=s.id_jadwal WHERE s.id_sesi=$id_sesi LIMIT 1");
+            $ss=$sq?mysqli_fetch_assoc($sq):null;
+            if(!$ss||$ss['status_sesi']!=='sedang_mengerjakan'){echo json_encode(['status'=>'error','msg'=>'Sesi tidak aktif.']);exit;}
+            $nextQ=mysqli_query($conn,"SELECT * FROM cbt_jadwal_subtes WHERE id_jadwal=".(int)$ss['id_jadwal']." AND urutan>".(int)$ss['subtes_ke']." ORDER BY urutan LIMIT 1");
+            $next=$nextQ?mysqli_fetch_assoc($nextQ):null;
+            if($next){$nid=(int)$next['id_subtes'];$order=(int)$next['urutan'];$seconds=(int)$next['durasi_menit']*60;$now=date('Y-m-d H:i:s');mysqli_query($conn,"UPDATE cbt_sesi SET id_subtes_aktif=$nid,subtes_ke=$order,waktu_mulai_subtes='$now',sisa_detik_subtes=$seconds WHERE id_sesi=$id_sesi");echo json_encode(['status'=>'next','msg'=>'Berpindah ke '.$next['nama_subtes'],'sisa_detik'=>$seconds]);}
+            else {$result=cbt_calculate_score($conn,$id_sesi);echo json_encode(['status'=>'finished','data'=>$result]);}
+            break;
+
         case 'ping':
             $id_sesi    = (int)($_POST['id_sesi'] ?? 0);
             require_exam_session_owner($id_sesi);
-            $qTimer = mysqli_query($conn, "SELECT s.waktu_mulai, j.durasi_menit FROM cbt_sesi s JOIN cbt_jadwal j ON j.id_jadwal=s.id_jadwal WHERE s.id_sesi=$id_sesi LIMIT 1");
+            $qTimer = mysqli_query($conn, "SELECT s.waktu_mulai,s.tambahan_detik,j.durasi_menit FROM cbt_sesi s JOIN cbt_jadwal j ON j.id_jadwal=s.id_jadwal WHERE s.id_sesi=$id_sesi LIMIT 1");
             $timer = mysqli_fetch_assoc($qTimer);
-            $sisa_detik = $timer ? max(0, ((int)$timer['durasi_menit'] * 60) - (time() - strtotime($timer['waktu_mulai']))) : 0;
+            $sisa_detik = $timer ? max(0, ((int)$timer['durasi_menit'] * 60) + (int)$timer['tambahan_detik'] - (time() - strtotime($timer['waktu_mulai']))) : 0;
             mysqli_query($conn, "UPDATE cbt_sesi SET sisa_detik = $sisa_detik WHERE id_sesi = $id_sesi");
             echo json_encode(['status' => 'pong', 'timestamp' => time()]);
             break;
+
+        case 'log_violation':
+            $id_sesi=(int)($_POST['id_sesi']??0);require_exam_session_owner($id_sesi);
+            $liveQ=mysqli_query($conn,"SELECT status_sesi FROM cbt_sesi WHERE id_sesi=$id_sesi LIMIT 1");$live=$liveQ?mysqli_fetch_assoc($liveQ):null;if(!$live||$live['status_sesi']!=='sedang_mengerjakan'){echo json_encode(['status'=>'success','ignored'=>true]);exit;}
+            $allowed=['tab_hidden','fullscreen_exit','copy','paste','context_menu','print_screen','camera_denied','camera_unavailable','screen_denied','screen_share_stopped'];
+            $type=(string)($_POST['type']??'');if(!in_array($type,$allowed,true)){echo json_encode(['status'=>'error','msg'=>'Jenis pelanggaran tidak valid.']);exit;}
+            $detail=cbt_clean_input($conn,mb_substr((string)($_POST['detail']??''),0,255));$ip=cbt_clean_input($conn,$_SERVER['REMOTE_ADDR']??'');
+            $recent=mysqli_query($conn,"SELECT 1 FROM cbt_pelanggaran WHERE id_sesi=$id_sesi AND jenis='".cbt_clean_input($conn,$type)."' AND created_at>=DATE_SUB(NOW(),INTERVAL 3 SECOND) LIMIT 1");
+            if(!$recent||mysqli_num_rows($recent)===0)mysqli_query($conn,"INSERT INTO cbt_pelanggaran(id_sesi,jenis,detail,ip_address) VALUES($id_sesi,'".cbt_clean_input($conn,$type)."','$detail','$ip')");
+            $countQ=mysqli_query($conn,"SELECT COUNT(*) total FROM cbt_pelanggaran WHERE id_sesi=$id_sesi AND resolved_at IS NULL");$count=$countQ?(int)mysqli_fetch_assoc($countQ)['total']:0;
+            $suspended=false;if($count>=4){mysqli_query($conn,"UPDATE cbt_sesi SET status_sesi='ditangguhkan',alasan_tindakan='Batas maksimal 4 pelanggaran tercapai' WHERE id_sesi=$id_sesi AND status_sesi='sedang_mengerjakan'");$suspended=mysqli_affected_rows($conn)>0;}
+            echo json_encode(['status'=>'success','count'=>$count,'limit'=>4,'suspended'=>$suspended]);break;
+
+        case 'upload_proctor_frame':
+            $id_sesi=(int)($_POST['id_sesi']??0);require_exam_session_owner($id_sesi);
+            $type=(string)($_POST['media_type']??'');$data=(string)($_POST['image_data']??'');
+            if(!in_array($type,['camera','screen'],true)||!preg_match('#^data:image/jpeg;base64,([A-Za-z0-9+/=]+)$#',$data,$match)){http_response_code(422);echo json_encode(['status'=>'error','msg'=>'Frame tidak valid.']);exit;}
+            $binary=base64_decode($match[1],true);if($binary===false||strlen($binary)>1500000){http_response_code(422);echo json_encode(['status'=>'error','msg'=>'Frame terlalu besar.']);exit;}
+            $relative='uploads/proctor/'.$id_sesi.'/'.$type.'_'.date('Ymd_His').'_'.bin2hex(random_bytes(4)).'.jpg';$absolute=__DIR__.'/../../../'.$relative;$dir=dirname($absolute);if(!is_dir($dir))mkdir($dir,0755,true);
+            if(file_put_contents($absolute,$binary)===false){http_response_code(500);echo json_encode(['status'=>'error','msg'=>'Gagal menyimpan frame.']);exit;}
+            $pathEsc=mysqli_real_escape_string($conn,$relative);mysqli_query($conn,"INSERT INTO cbt_proctor_media(id_sesi,media_type,file_path) VALUES($id_sesi,'$type','$pathEsc')");echo json_encode(['status'=>'success']);break;
 
         default:
             echo json_encode(['status' => 'error', 'msg' => 'Aksi tidak valid']);
