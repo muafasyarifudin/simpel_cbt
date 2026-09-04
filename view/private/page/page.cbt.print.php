@@ -13,7 +13,7 @@ if ($id_sesi <= 0) {
 }
 
 // Ambil data sesi & hasil
-$q = "SELECT s.*, j.nama_ujian, j.passing_grade, j.durasi_menit, j.tipe_ujian,
+ $q = "SELECT s.*, j.nama_ujian, j.passing_grade, j.durasi_menit, j.tipe_ujian, j.tampilkan_hasil,
              h.id_hasil, h.total_soal, h.total_dijawab, h.jumlah_benar, h.jumlah_salah, h.jumlah_kosong, h.nilai_akhir, h.status_kelulusan, h.catatan, h.created_at as tgl_hasil
       FROM cbt_sesi s
       JOIN cbt_jadwal j ON s.id_jadwal = j.id_jadwal
@@ -33,6 +33,10 @@ $validSig = $providedSig !== '' && hash_equals(exam_result_signature($id_sesi, $
 if (!$isOwner && !$isStaff && !$validSig) {
     http_response_code(403);
     die("<div style='text-align:center;padding:50px;font-family:sans-serif'><h2>Akses Ditolak</h2><p>Tautan hasil tidak valid.</p></div>");
+}
+if (empty($d['tampilkan_hasil']) && !$isStaff) {
+    http_response_code(403);
+    die("<div style='text-align:center;padding:50px;font-family:sans-serif'><h2>Hasil Belum Diumumkan</h2><p>Nilai akan ditampilkan oleh panitia pada waktunya.</p></div>");
 }
 
 $isLulus = ($d['status_kelulusan'] === 'LULUS');

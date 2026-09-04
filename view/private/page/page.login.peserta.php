@@ -20,6 +20,11 @@ if ($qJadwal) {
 $authConfig = get_auth_bridge_config();
 $needPass = ($authConfig['require_password'] ?? false);
 $authMode = ($authConfig['mode'] ?? 1);
+$participantCountResult = mysqli_query($conn, "SELECT COUNT(*) cnt FROM cbt_peserta WHERE status=1");
+$participantCount = $participantCountResult ? (int)mysqli_fetch_assoc($participantCountResult)['cnt'] : 0;
+if (($authConfig['mode'] ?? 'standalone') === 'standalone' && $participantCount > 0) { $needPass = true; }
+$announcementQuery = mysqli_query($conn, "SELECT judul,isi FROM cbt_pengumuman WHERE status=1 AND (aktif_mulai IS NULL OR aktif_mulai<=NOW()) AND (aktif_selesai IS NULL OR aktif_selesai>=NOW()) ORDER BY id_pengumuman DESC LIMIT 3");
+$announcements=[]; while($announcementQuery && $a=mysqli_fetch_assoc($announcementQuery)){$announcements[]=$a;}
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -65,7 +70,7 @@ $authMode = ($authConfig['mode'] ?? 1);
 
         .login-card {
             width: 100%;
-            max-width: 410px;
+            max-width: 680px;
             background: #ffffff;
             border: 1px solid var(--border-subtle);
             border-radius: var(--card-radius);
@@ -304,6 +309,9 @@ $authMode = ($authConfig['mode'] ?? 1);
         </div>
 
         <form id="formStartExam" autocomplete="off">
+            <?php foreach ($announcements as $announcement): ?>
+            <div class="alert alert-primary py-2 small"><strong><?= htmlspecialchars($announcement['judul']) ?></strong><br><?= nl2br(htmlspecialchars($announcement['isi'])) ?></div>
+            <?php endforeach; ?>
             
             <!-- NOMOR PESERTA / USER ID -->
             <div class="mb-3">
@@ -354,7 +362,7 @@ $authMode = ($authConfig['mode'] ?? 1);
                             <?php endif; ?>
                             <?php foreach ($jadwalList as $j): ?>
                                 <option value="<?= $j['id_jadwal'] ?>" <?= (count($jadwalList) === 1) ? 'selected' : '' ?>>
-                                    <?= htmlspecialchars($j['nama_ujian']) ?> (<?= $j['durasi_menit'] ?> Menit)
+                                    <?= htmlspecialchars($j['nama_ujian']) ?> · <?= htmlspecialchars($j['nama_sesi'] ?? 'Sesi Utama') ?> (<?= $j['durasi_menit'] ?> Menit)
                                 </option>
                             <?php endforeach; ?>
                         <?php endif; ?>

@@ -272,6 +272,7 @@ if ($sesi['status_sesi'] === 'selesai') {
             padding: 4px 8px;
             border-radius: 6px;
         }
+        #proctorPreview{position:fixed;right:16px;bottom:16px;width:150px;background:#0f172a;border:2px solid #6366f1;border-radius:12px;overflow:hidden;z-index:1050;box-shadow:0 10px 30px rgba(15,23,42,.3)}#proctorPreview span{display:flex;align-items:center;gap:5px;padding:5px 8px;color:#fff;font-size:10px;font-weight:600}#proctorPreview video{display:block;width:100%;height:90px;object-fit:cover;transform:scaleX(-1)}@media(max-width:768px){#proctorPreview{width:105px;right:8px;bottom:8px}#proctorPreview video{height:64px}}
     </style>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/boxicons@latest/css/boxicons.min.css" />
 </head>
@@ -429,19 +430,105 @@ if ($sesi['status_sesi'] === 'selesai') {
     <!-- Script CBT Engine -->
     <script>
         const SESSION_ID = <?= $id_sesi ?>;
+        const EXAM_TYPE = <?= json_encode($sesi['tipe_ujian']) ?>;
         let soalData = [];
         let currentIndex = 0;
         let sisaDetik = <?= (int)$sesi['sisa_detik'] ?>;
         let timerInterval = null;
         let pingInterval = null;
         let fontSizeLevel = 0;
+        let sessionSuspended = false;
+        const pendingSaves = new Set();
+        let cameraStream=null,screenStream=null,captureInterval=null,cameraVideo=null,screenVideo=null;
+        const OFFLINE_KEY = 'simpel_cbt_queue_' + SESSION_ID;
+
+        function queueOffline(action, payload) {
+            const queue = JSON.parse(localStorage.getItem(OFFLINE_KEY) || '[]');
+            const filtered = queue.filter(x => !(x.action === action && x.payload.id_soal === payload.id_soal));
+            filtered.push({action, payload, queued_at: Date.now()});
+            localStorage.setItem(OFFLINE_KEY, JSON.stringify(filtered));
+            showSaveIndicator(false, true);
+        }
+        async function flushOfflineQueue() {
+            const queue = JSON.parse(localStorage.getItem(OFFLINE_KEY) || '[]');
+            if (!queue.length || !navigator.onLine) return;
+            const remaining = [];
+            for (const item of queue) {
+                try {
+                    const fd = new FormData(); Object.entries(item.payload).forEach(([k,v]) => fd.append(k,v));
+                    const res = await fetch('api/exam_api.php?action=' + item.action, {method:'POST',body:fd});
+                    const data = await res.json(); if (!res.ok || data.status !== 'success') throw new Error();
+                } catch (e) { remaining.push(item); }
+            }
+            localStorage.setItem(OFFLINE_KEY, JSON.stringify(remaining));
+            if (!remaining.length) showSaveIndicator(false);
+        }
+        function logViolation(type, detail='') {
+            if(sessionSuspended)return;
+            const fd=new FormData();fd.append('id_sesi',SESSION_ID);fd.append('type',type);fd.append('detail',detail);
+            fetch('api/exam_api.php?action=log_violation',{method:'POST',body:fd}).then(r=>r.json()).then(data=>{
+                if(data.suspended){sessionSuspended=true;clearInterval(timerInterval);clearInterval(pingInterval);stopProctoring();Swal.fire({icon:'error',title:'Ujian Ditangguhkan',html:'Anda telah mencapai <b>4 pelanggaran</b>. Jawaban tetap tersimpan, tetapi ujian dikunci sementara.<br><br>Silakan hubungi pengawas.',allowOutsideClick:false,allowEscapeKey:false,showConfirmButton:false});}
+                else if(data.count>0) Swal.fire({toast:true,position:'top-end',icon:'warning',title:`Pelanggaran ${data.count} dari ${data.limit}`,showConfirmButton:false,timer:2200});
+            }).catch(()=>{});
+        }
+        async function requestScreenShare() {
+            if (!navigator.mediaDevices?.getDisplayMedia) {
+                await Swal.fire({icon:'error',title:'Browser Tidak Mendukung Berbagi Layar',text:'Gunakan Chrome, Edge, atau browser modern lain agar pengawasan layar dapat diaktifkan.',confirmButtonText:'Mengerti'});
+                return false;
+            }
+            const result = await Swal.fire({
+                icon:'info',
+                title:'Aktifkan Berbagi Layar',
+                html:'<div class="text-start"><p>Klik tombol di bawah, pilih <b>seluruh layar</b>, lalu tekan <b>Bagikan</b>.</p><p class="mb-0 text-muted">Dialog pemilihan layar berasal langsung dari browser dan harus dibuka melalui klik Anda.</p></div>',
+                confirmButtonText:'Pilih Layar & Bagikan',
+                showCancelButton:true,
+                cancelButtonText:'Lanjut Tanpa Berbagi',
+                allowOutsideClick:false,
+                allowEscapeKey:false,
+                preConfirm: async () => {
+                    try {
+                        return await navigator.mediaDevices.getDisplayMedia({video:{displaySurface:'monitor'},audio:false});
+                    } catch (error) {
+                        const message = error?.name === 'NotAllowedError'
+                            ? 'Berbagi layar belum diizinkan. Pilih layar lalu tekan Bagikan, atau gunakan tombol batal jika memang ingin menolak.'
+                            : 'Dialog berbagi layar gagal dibuka. Silakan coba lagi.';
+                        Swal.showValidationMessage(message);
+                        return false;
+                    }
+                }
+            });
+            if (!result.isConfirmed) {
+                logViolation('screen_denied','Peserta memilih melanjutkan tanpa berbagi layar');
+                return false;
+            }
+            screenStream=result.value;
+            screenVideo=document.createElement('video');screenVideo.srcObject=screenStream;screenVideo.muted=true;screenVideo.playsInline=true;await screenVideo.play();
+            screenStream.getVideoTracks()[0]?.addEventListener('ended',()=>logViolation('screen_share_stopped','Berbagi layar dihentikan'));
+            return true;
+        }
+        async function startSecureMode() {
+            try { if(!document.fullscreenElement) await document.documentElement.requestFullscreen(); } catch(e) {}
+            if(navigator.mediaDevices?.getUserMedia){try{cameraStream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:640},height:{ideal:360}},audio:false});cameraVideo=document.createElement('video');cameraVideo.srcObject=cameraStream;cameraVideo.muted=true;cameraVideo.playsInline=true;await cameraVideo.play();const preview=document.createElement('div');preview.id='proctorPreview';preview.innerHTML='<span><i class="bx bx-video-recording"></i> Proctor aktif</span>';preview.appendChild(cameraVideo);document.body.appendChild(preview);}catch(e){logViolation('camera_denied','Izin kamera ditolak');}}
+            else logViolation('camera_unavailable','Kamera tidak didukung browser');
+            captureProctorFrames();captureInterval=setInterval(captureProctorFrames,30000);
+        }
+        function uploadFrame(video,type){if(!video||video.readyState<2)return;const canvas=document.createElement('canvas');const maxWidth=640;const ratio=Math.min(1,maxWidth/video.videoWidth);canvas.width=Math.max(1,Math.round(video.videoWidth*ratio));canvas.height=Math.max(1,Math.round(video.videoHeight*ratio));canvas.getContext('2d').drawImage(video,0,0,canvas.width,canvas.height);const fd=new FormData();fd.append('id_sesi',SESSION_ID);fd.append('media_type',type);fd.append('image_data',canvas.toDataURL('image/jpeg',.68));fetch('api/exam_api.php?action=upload_proctor_frame',{method:'POST',body:fd}).catch(()=>{});}
+        function captureProctorFrames(){uploadFrame(cameraVideo,'camera');uploadFrame(screenVideo,'screen');}
+        function stopProctoring(){clearInterval(captureInterval);cameraStream?.getTracks().forEach(t=>t.stop());screenStream?.getTracks().forEach(t=>t.stop());}
+        function installSecurityGuards(){
+            document.addEventListener('visibilitychange',()=>{if(document.hidden)logViolation('tab_hidden','Peserta berpindah tab atau meminimalkan browser');});
+            document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement)logViolation('fullscreen_exit','Keluar dari mode layar penuh');});
+            document.addEventListener('copy',e=>{e.preventDefault();logViolation('copy','Percobaan menyalin konten');});
+            document.addEventListener('paste',e=>{e.preventDefault();logViolation('paste','Percobaan menempel konten');});
+            document.addEventListener('contextmenu',e=>{e.preventDefault();logViolation('context_menu','Klik kanan diblokir');});
+            window.addEventListener('keyup',e=>{if(e.key==='PrintScreen'){navigator.clipboard?.writeText('');logViolation('print_screen','Tombol PrintScreen terdeteksi');}});
+        }
 
         document.addEventListener('DOMContentLoaded', function() {
-            loadExamQuestions();
-            startTimer();
-
-            pingInterval = setInterval(sendPing, 25000);
             window.addEventListener('keydown', handleKeyboardShortcuts);
+            window.addEventListener('online', flushOfflineQueue);
+            window.addEventListener('offline', () => showSaveIndicator(false, true));
+            Swal.fire({icon:'warning',title:'Peraturan Ujian & Persetujuan Proctoring',width:650,html:'<div class="text-start"><p>Ujian menggunakan <b>kamera dan berbagi layar</b>. Snapshot kamera serta layar diambil berkala selama sesi dan hanya dapat dilihat admin/pengawas.</p><p>Aktivitas berikut dicatat sebagai pelanggaran:</p><ul><li>Berpindah tab atau meminimalkan browser</li><li>Keluar layar penuh atau menghentikan berbagi layar</li><li>Copy, paste, klik kanan, atau PrintScreen</li><li>Menolak izin kamera/berbagi layar</li></ul><div class="alert alert-danger mb-0"><b>Maksimal 4 pelanggaran.</b> Pelanggaran ke-4 menangguhkan ujian sampai dibuka pengawas.</div></div>',confirmButtonText:'Saya Setuju, Aktifkan & Mulai',allowOutsideClick:false,allowEscapeKey:false}).then(async()=>{await requestScreenShare();await startSecureMode();installSecurityGuards();loadExamQuestions();startTimer();pingInterval=setInterval(sendPing,25000);flushOfflineQueue();});
 
             window.addEventListener('beforeunload', function(e) {
                 e.preventDefault();
@@ -473,6 +560,8 @@ if ($sesi['status_sesi'] === 'selesai') {
                     }).then(() => {
                         window.location.href = 'print.php?id_sesi=' + SESSION_ID;
                     });
+                } else if(data.status==='suspended'){
+                    sessionSuspended=true;clearInterval(timerInterval);Swal.fire({icon:'error',title:'Ujian Ditangguhkan',text:data.msg,allowOutsideClick:false,allowEscapeKey:false,showConfirmButton:false});
                 } else {
                     Swal.fire({ icon: 'error', title: 'Perhatian', text: data.msg });
                 }
@@ -626,13 +715,15 @@ if ($sesi['status_sesi'] === 'selesai') {
             formData.append('id_soal', q.id_soal);
             formData.append('jawaban', k);
 
-            fetch('api/exam_api.php?action=simpan_jawaban', {
+            const saveRequest = fetch('api/exam_api.php?action=simpan_jawaban', {
                 method: 'POST',
                 body: formData
             })
-            .then(res => res.json())
+            .then(async res => {const data=await res.json();if(!res.ok||data.status!=='success')throw new Error(data.msg||'Gagal menyimpan');return data;})
             .then(() => showSaveIndicator(false))
-            .catch(() => showSaveIndicator(false, true));
+            .catch(() => queueOffline('simpan_jawaban', {id_sesi:SESSION_ID,id_soal:q.id_soal,jawaban:k}))
+            .finally(()=>pendingSaves.delete(saveRequest));
+            pendingSaves.add(saveRequest);
         }
 
         // 5. Toggle Ragu
@@ -659,7 +750,7 @@ if ($sesi['status_sesi'] === 'selesai') {
             fetch('api/exam_api.php?action=set_ragu', {
                 method: 'POST',
                 body: formData
-            });
+            }).catch(() => queueOffline('set_ragu', {id_sesi:SESSION_ID,id_soal:q.id_soal,is_ragu:q.is_ragu}));
         }
 
         // 6. Navigasi
@@ -799,7 +890,10 @@ if ($sesi['status_sesi'] === 'selesai') {
             });
         }
 
-        function submitFinalExam() {
+        async function submitFinalExam() {
+            if(pendingSaves.size){showSaveIndicator(true);await Promise.allSettled([...pendingSaves]);}
+            await flushOfflineQueue();
+            if (EXAM_TYPE === 'multi_subtes') { advanceSubtest(); return; }
             Swal.fire({
                 title: 'Menghitung Skor...',
                 text: 'Mohon tunggu, lembar jawaban Anda sedang dihitung otomatis.',
@@ -817,6 +911,7 @@ if ($sesi['status_sesi'] === 'selesai') {
             .then(res => res.json())
             .then(data => {
                 if (data.status === 'success') {
+                    stopProctoring();
                     Swal.fire({
                         icon: 'success',
                         title: 'Ujian Berhasil Diselesaikan!',
@@ -841,6 +936,16 @@ if ($sesi['status_sesi'] === 'selesai') {
             .catch(() => {
                 Swal.fire({ icon: 'error', title: 'Gangguan Jaringan', text: 'Gagal terhubung ke server untuk menyelesaikan ujian.' });
             });
+        }
+
+        function advanceSubtest() {
+            const fd=new FormData();fd.append('id_sesi',SESSION_ID);
+            Swal.fire({title:'Menyelesaikan Subtes...',allowOutsideClick:false,didOpen:()=>Swal.showLoading()});
+            fetch('api/exam_api.php?action=next_subtes',{method:'POST',body:fd}).then(r=>r.json()).then(data=>{
+                if(data.status==='next'){Swal.fire({icon:'info',title:'Subtes Berikutnya',text:data.msg,confirmButtonText:'Mulai'}).then(()=>location.reload());}
+                else if(data.status==='finished'){stopProctoring();localStorage.removeItem(OFFLINE_KEY);Swal.fire({icon:'success',title:'Seluruh Ujian Selesai',text:'Jawaban Anda telah dikunci.',confirmButtonText:'Lihat Hasil'}).then(()=>location.href='print.php?id_sesi='+SESSION_ID);}
+                else Swal.fire('Gagal',data.msg||'Tidak dapat berpindah subtes.','error');
+            }).catch(()=>Swal.fire('Gangguan Jaringan','Coba kembali saat koneksi pulih.','error'));
         }
 
         function timeIsUpSubmit() {
