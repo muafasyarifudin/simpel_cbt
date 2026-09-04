@@ -32,6 +32,28 @@ if (!function_exists('auth_bridge_verify_user')) {
 
         // 1. MODE STANDALONE
         if ($mode === 'standalone') {
+            global $conn;
+            if (isset($conn) && $conn) {
+                $hasTable = mysqli_query($conn, "SHOW TABLES LIKE 'cbt_peserta'");
+                $countResult = ($hasTable && mysqli_num_rows($hasTable)) ? mysqli_query($conn, "SELECT COUNT(*) cnt FROM cbt_peserta") : false;
+                $participantCount = $countResult ? (int)mysqli_fetch_assoc($countResult)['cnt'] : 0;
+                if ($participantCount > 0) {
+                    $uEsc = mysqli_real_escape_string($conn, $uTrim);
+                    $query = mysqli_query($conn, "SELECT * FROM cbt_peserta WHERE no_peserta='$uEsc' AND status=1 LIMIT 1");
+                    $participant = $query ? mysqli_fetch_assoc($query) : null;
+                    if (!$participant) {
+                        return ['valid' => false, 'msg' => 'Nomor peserta tidak terdaftar atau tidak aktif.'];
+                    }
+                    if (!empty($participant['password']) && !password_verify($password, $participant['password'])) {
+                        return ['valid' => false, 'msg' => 'PIN atau password peserta salah.'];
+                    }
+                    return [
+                        'valid' => true, 'username' => $participant['no_peserta'],
+                        'name' => $participant['nama_lengkap'], 'mode' => 'standalone_registered',
+                        'raw' => ['id_peserta' => (int)$participant['id_peserta'], 'id_ruang' => $participant['id_ruang']]
+                    ];
+                }
+            }
             return [
                 'valid'    => true,
                 'username' => $uTrim,

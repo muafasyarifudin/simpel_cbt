@@ -30,6 +30,7 @@ if (session_status() === PHP_SESSION_NONE) {
 error_reporting(E_ALL & ~E_NOTICE & ~E_WARNING);
 ini_set('display_errors', 0);
 mysqli_report(MYSQLI_REPORT_OFF);
+date_default_timezone_set(getenv('APP_TIMEZONE') ?: 'Asia/Jakarta');
 
 // Kredensial Database
 define('DB_HOST', getenv('DB_HOST') ?: 'localhost');
@@ -79,3 +80,5 @@ $checkTable = mysqli_query($conn, "SHOW TABLES LIKE 'cbt_jadwal'");
 if ($checkTable && mysqli_num_rows($checkTable) === 0) {
     require_once __DIR__ . '/migration.php';
 }
+
+require_once __DIR__ . '/cbt_upgrade.php';

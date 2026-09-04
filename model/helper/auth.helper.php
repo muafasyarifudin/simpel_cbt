@@ -99,6 +99,22 @@ if (!function_exists('exam_result_signature')) {
     }
 }
 
+if (!function_exists('audit_log')) {
+    function audit_log($conn, $aksi, $entitas = null, $idEntitas = null, array $detail = []) {
+        $user = get_logged_admin();
+        $id = (int)($user['id'] ?? 0);
+        $username = mysqli_real_escape_string($conn, (string)($user['username'] ?? 'system'));
+        $role = mysqli_real_escape_string($conn, (string)($user['role'] ?? 'system'));
+        $aksiEsc = mysqli_real_escape_string($conn, (string)$aksi);
+        $entitasEsc = mysqli_real_escape_string($conn, (string)$entitas);
+        $idEsc = mysqli_real_escape_string($conn, (string)$idEntitas);
+        $json = mysqli_real_escape_string($conn, json_encode($detail, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        $ip = mysqli_real_escape_string($conn, (string)($_SERVER['REMOTE_ADDR'] ?? ''));
+        mysqli_query($conn, "INSERT INTO cbt_audit_log(id_admin,username,role,aksi,entitas,id_entitas,detail_json,ip_address)
+            VALUES(" . ($id ?: 'NULL') . ",'$username','$role','$aksiEsc','$entitasEsc','$idEsc','$json','$ip')");
+    }
+}
+
 if (!function_exists('check_pusat_login')) {
     function check_pusat_login() {
         check_admin_login();
