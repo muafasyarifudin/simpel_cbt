@@ -1,0 +1,1 @@
+<?php require_once __DIR__ . '/../model/ajax/cbt/exam_api.php'; ?>

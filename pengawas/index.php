@@ -1,0 +1,1 @@
+<?php header('Location: ../index.php?m=pusat#monitoring'); exit(); ?>
